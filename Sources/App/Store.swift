@@ -38,6 +38,59 @@ struct Usage {
     var sevenDay: (percent: Double, resetsAt: Double)?
 }
 
+// Settings, kept in UserDefaults. The views bind to the same keys with @AppStorage.
+enum Pref {
+    static let openOnHover = "openOnHover"
+    static let openForApprovals = "openForApprovals"
+    static let approveInNotch = "approveInNotch"
+    static let showUsage = "showUsage"
+    static let agents = ["claude", "codex", "opencode"]
+    static func agent(_ name: String) -> String { "agent." + name }
+    static let defaults: [String: Any] = [openOnHover: true, openForApprovals: true, approveInNotch: true, showUsage: true]
+
+    static func on(_ key: String) -> Bool { UserDefaults.standard.object(forKey: key) as? Bool ?? defaults[key] as? Bool ?? true }
+}
+
+// One sound per kind of event, each with its own switch in Settings.
+enum Sound: String, CaseIterable {
+    case start, needsYou, done, failed, limit, end
+
+    var file: String {
+        switch self {
+        case .start: "Pop"
+        case .needsYou: "Funk"
+        case .done: "Glass"
+        case .failed: "Basso"
+        case .limit: "Sosumi"
+        case .end: "Bottle"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .start: "New session"
+        case .needsYou: "Needs you"
+        case .done: "Finished"
+        case .failed: "Failed"
+        case .limit: "Rate limit"
+        case .end: "Session ended"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .start: "An agent starts a session"
+        case .needsYou: "A permission request or question"
+        case .done: "An agent finishes its turn"
+        case .failed: "A turn stops on an error"
+        case .limit: "Hit a rate limit, or plan usage passes 90%"
+        case .end: "A session closes or its agent quits"
+        }
+    }
+
+    var key: String { "sound." + rawValue }
+}
+
 @MainActor
 final class Store: ObservableObject {
     @Published var sessions: [String: Session] = [:]
@@ -48,6 +101,8 @@ final class Store: ObservableObject {
     }
     // Sessions you hid with ✕; discovery leaves them out until they show new activity.
     private var hidden: Set<String> = []
+    // One exit watcher per agent process, so its sessions go the moment it quits (agents rarely send SessionEnd on quit).
+    private var exitWatchers: [Int32: DispatchSourceProcess] = [:]
 
     // Sessions that need you first, then the most recently active.
     var ordered: [Session] {
@@ -61,14 +116,20 @@ final class Store: ObservableObject {
             if fd >= 0 { close(fd) }
             return
         }
+        // A switched-off agent is ignored; closing the connection makes it ask in its own terminal.
+        guard Pref.on(Pref.agent(e["_agent"] as? String ?? sessions[id]?.agent ?? "claude")) else {
+            if fd >= 0 { close(fd) }
+            return
+        }
         // Only a permission request keeps its connection open, waiting for the answer.
         if name != "PermissionRequest" && fd >= 0 { close(fd) }
         hidden.remove(id)
+        let isNew = sessions[id] == nil
         var s = sessions[id] ?? Session(id: id)
         s.cwd = e["cwd"] as? String ?? s.cwd
         s.transcriptPath = e["transcript_path"] as? String ?? s.transcriptPath
         if let t = e["_terminal"] as? [String: Any], !t.isEmpty { s.terminal = t }
-        if let pid = e["_agent_pid"] as? Int { s.agentPID = Int32(pid) }
+        if let pid = e["_agent_pid"] as? Int { s.agentPID = Int32(pid); watchExit(Int32(pid)) }
         if let agent = e["_agent"] as? String { s.agent = agent }
         if let title = e["_title"] as? String { s.title = title }  // agents without a transcript title (OpenCode)
         s.updated = Date()
@@ -76,6 +137,7 @@ final class Store: ObservableObject {
         switch name {
         case "SessionStart":
             s.status = .idle
+            if isNew { play(.start) }  // not on resume or compact of a session already shown
         case "UserPromptSubmit":
             if let prompt = cleanPrompt(e["prompt"] as? String) {
                 s.lastPrompt = prompt
@@ -89,41 +151,43 @@ final class Store: ObservableObject {
         case "PermissionRequest":
             dropPending(&s)
             let tool = e["tool_name"] as? String ?? "Tool"
-            if tool == "AskUserQuestion" {
+            if tool == "AskUserQuestion" || !Pref.on(Pref.approveInNotch) {
                 // Questions need the terminal's own picker; just flag the session.
                 close(fd)
                 s.status = .waiting
                 s.tool = tool
-                s.activity = "Has a question for you"
+                s.activity = tool == "AskUserQuestion" ? "Has a question for you" : "Needs your approval in the terminal"
             } else {
                 let always = !((e["permission_suggestions"] as? [Any]) ?? []).isEmpty
                 s.pending = watch(fd, tool: tool, detail: detail(e), canAlways: always, session: id)
                 s.status = .waiting
-                expanded = true
+                if Pref.on(Pref.openForApprovals) { expanded = true }
             }
-            play("Funk")
+            play(.needsYou)
         case "Notification":
             if s.pending == nil {
                 s.activity = e["message"] as? String ?? s.activity
                 s.status = e["notification_type"] as? String == "idle_prompt" ? .done : .waiting
             }
-            play("Funk")
+            // The idle reminder follows a finished turn that already chimed.
+            if e["notification_type"] as? String != "idle_prompt" { play(.needsYou) }
         case "Stop":
             dropPending(&s)
             s.status = .done
             s.lastMessage = e["last_assistant_message"] as? String ?? s.lastMessage
             s.tool = nil
             s.activity = nil
-            play("Glass")
+            play(.done)
         case "StopFailure":
             dropPending(&s)
             s.status = .failed
             s.tool = nil
             s.activity = e["error"] as? String ?? "Turn failed"
-            play("Basso")
+            play((e["error"] as? String ?? "").contains("rate_limit") ? .limit : .failed)
         case "SessionEnd":
             dropPending(&s)
             sessions[id] = nil
+            play(.end)
             return
         default:
             break
@@ -153,16 +217,44 @@ final class Store: ObservableObject {
         hidden.insert(id)
     }
 
-    // Sessions whose agent process is gone never sent SessionEnd (crash, kill -9).
+    // Switching an agent off drops its cards (pending approvals go back to its terminal); not hidden, so they return when switched on.
+    func dropAgent(_ agent: String) {
+        for var s in sessions.values where s.agent == agent {
+            dropPending(&s)
+            sessions[s.id] = nil
+        }
+    }
+
+    private func watchExit(_ pid: Int32) {
+        guard exitWatchers[pid] == nil else { return }
+        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.exitWatchers.removeValue(forKey: pid)?.cancel()
+                // Archive directly: a not-yet-reaped zombie still passes pruneDead's kill(pid, 0).
+                let gone = self.sessions.values.filter { $0.agentPID == pid }
+                for s in gone { self.archive(s.id) }
+                if !gone.isEmpty { self.play(.end) }
+            }
+        }
+        source.resume()
+        exitWatchers[pid] = source
+    }
+
+    // Fallback for a process that died before its watcher started.
     func pruneDead() {
         for s in sessions.values {
             if let pid = s.agentPID, kill(pid, 0) != 0, errno == ESRCH { archive(s.id) }
         }
+        // Drop watchers that never fired, so a reused PID gets a fresh one.
+        for pid in exitWatchers.keys where kill(pid, 0) != 0 && errno == ESRCH { exitWatchers.removeValue(forKey: pid)?.cancel() }
     }
 
     // Rebuild state from Claude Code's own records (~/.claude/sessions/<pid>.json), so sessions that
     // started, or kept running, while this app was closed show up without waiting for their next hook event.
     func discover() {
+        guard Pref.on(Pref.agent("claude")) else { return }
         let dir = home + "/.claude/sessions"
         let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         for file in files where file.hasSuffix(".json") {
@@ -172,7 +264,7 @@ final class Store: ObservableObject {
                   !hidden.contains(id), isLiveClaude(pid_t(pid), startedAt: record["startedAt"] as? Double) else { continue }
             let known = sessions[id] != nil
             var s = sessions[id] ?? Session(id: id)
-            if s.agentPID == nil { s.agentPID = Int32(pid) }
+            if s.agentPID == nil { s.agentPID = Int32(pid); watchExit(Int32(pid)) }
             if s.cwd.isEmpty { s.cwd = record["cwd"] as? String ?? "" }
             if s.terminal.isEmpty { s.terminal = terminalInfo(from: pid_t(pid), env: processEnvironment(pid_t(pid))).terminal }
             if s.transcriptPath == nil { s.transcriptPath = findTranscript(id) }
@@ -198,11 +290,18 @@ final class Store: ObservableObject {
             let reset = w["resets_at"] as? Double ?? 0
             return reset > Date().timeIntervalSince1970 ? (p, reset) : nil
         }
-        usage = Usage(fiveHour: window("five_hour"), sevenDay: window("seven_day"))
+        let next = Usage(fiveHour: window("five_hour"), sevenDay: window("seven_day"))
+        // Chime once as a window crosses 90%; not on launch, when there is nothing to compare with.
+        func crossed(_ old: (percent: Double, resetsAt: Double)?, _ new: (percent: Double, resetsAt: Double)?) -> Bool {
+            guard let old, let new else { return false }
+            return old.percent < 90 && new.percent >= 90
+        }
+        if crossed(usage.fiveHour, next.fiveHour) || crossed(usage.sevenDay, next.sevenDay) { play(.limit) }
+        usage = next
     }
 
-    private func play(_ sound: String) {
-        if !muted { NSSound(named: NSSound.Name(sound))?.play() }
+    func play(_ sound: Sound) {
+        if !muted && Pref.on(sound.key) { NSSound(named: NSSound.Name(sound.file))?.play() }
     }
 
     private func dropPending(_ s: inout Session) {

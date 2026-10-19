@@ -9,12 +9,14 @@ Free, open source, fully local: no account, no server, no network calls, no tele
 
 ## Features
 
-- **Every session at a glance.** Each running agent gets a card with its title, your last prompt, the tool it is running right now and its last reply.
+- **Every session at a glance.** Each running agent gets a card with its title, your last prompt, the tool it is running right now and its last reply. Five cards show at once; the rest scroll.
 - **Approve from the notch.** When an agent asks for permission, the island opens with the exact command and four buttons: Allow, Always allow, Deny, or Terminal (answer it in the terminal instead).
 - **Jump back.** Click a card to bring its terminal forward, down to the exact pane in WezTerm and tmux; any other terminal or editor is brought to the front.
 - **Plan usage.** Your Claude 5-hour and 7-day usage sits in the header (Claude Pro and Max plans).
-- **Status in the notch.** Closed, the notch shows a spinner while agents work, a check when they finish and an orange count when one needs you.
-- **Sounds.** A soft system sound when a session finishes or needs you; one click mutes it.
+- **Status in the notch.** Closed, the notch shows a pulsing dot while agents work, a check when they finish and an amber count when one needs you.
+- **Opens on hover.** Rest the pointer on the notch and it opens; move away and it closes again (unless an approval is waiting).
+- **Sounds.** A different system sound for each event: a session starts (Pop), needs you (Funk), finishes (Glass), fails (Basso), hits a rate limit or passes 90% plan usage (Sosumi), or ends (Bottle). Each has its own switch in Settings; the speaker button mutes them all.
+- **Settings.** The gear in the header switches each agent on or off and controls hover, auto-open for approvals, approving from the notch, plan usage and each sound.
 - **Survives restarts.** Quit it, reboot, reinstall: on launch it finds the Claude sessions that are already running.
 
 ![The closed notch: three agents working, and one agent waiting for you](docs/images/notch.png)
@@ -24,7 +26,7 @@ Free, open source, fully local: no account, no server, no network calls, no tele
 | Agent | Sessions and live status | Approvals from the notch | How it connects |
 |---|---|---|---|
 | Claude Code | Yes, with Claude's own session titles | Yes, including "Always allow" | Hooks in `~/.claude/settings.json` |
-| Codex | Yes | Yes | Hooks in `~/.codex/hooks.json` |
+| Codex | Yes, from the CLI and the Codex app | Yes | Hooks in `~/.codex/hooks.json` |
 | OpenCode | Yes, with OpenCode's own session titles | Shows when it needs you; you answer in OpenCode | Plugin in `~/.config/opencode/plugins/` |
 
 The installer sets up every agent it finds on your Mac and skips the rest.
@@ -32,6 +34,7 @@ The installer sets up every agent it finds on your Mac and skips the rest.
 ## Install
 
 Requirements: macOS 14 or later and the Xcode Command Line Tools (`xcode-select --install`). Full Xcode is not needed.
+No notch? It works the same, as a small bar at the top centre of the screen.
 
 ```sh
 git clone https://github.com/MANISH007700/notch-island.git
@@ -39,22 +42,33 @@ cd notch-island
 ./install.sh
 ```
 
+```
+Notch Island
+  ✓ Built from source
+  ✓ Installed to ~/Applications/Notch Island.app
+  ✓ Claude Code connected
+  ✓ Codex connected  (first time: open Codex, run /hooks and approve the Notch Island entries)
+  ✓ OpenCode connected
+  ✓ Running, and starts at login
+```
+
 The installer builds the app from source, puts it in `~/Applications/Notch Island.app`, connects your agents and starts it at login.
 It saves an untouched copy of each config it edits next to the original, ending in `.bak-notch-island`.
+To update, run `git pull && ./install.sh`; your settings are kept.
 
 **Codex only:** Codex asks you to review new hooks once. Open Codex, run `/hooks` and approve the Notch Island entries.
 
 ## Use it
 
-- **Click the notch** to open the island; click anywhere else to close it.
-- **Click a card**, or its ↗ button, to jump to that session's terminal.
+- **Hover or click the notch** to open the island; move away or click anywhere else to close it.
+- **Click a card** to jump to that session's terminal.
 - **Hover a card** and click ✕ to hide it; it comes back when that session does something new.
 - When a session needs you, the island opens by itself:
   - **Allow** runs the tool once.
   - **Always allow** runs it and adds the rule the agent suggested, like "don't ask again" in Claude Code.
   - **Deny** refuses it.
   - **Terminal** leaves the question to the agent's own prompt.
-- The speaker button mutes sounds; the power button quits the app (it starts again at your next login).
+- In the header, the speaker mutes all sounds, the gear opens Settings, and the power button quits the app (it starts again at your next login).
 
 ## How it works
 
@@ -112,6 +126,7 @@ docs/                screenshot tooling and images
 
 - **Nothing shows up.** Check the app is running: `launchctl print gui/$(id -u)/local.notch-island | grep state`. Sessions that started before you installed appear on their next event (Claude Code sessions appear right away).
 - **Codex sessions do not appear.** Approve the hooks once with `/hooks` in Codex.
+- **An agent's sessions never show.** Check that agent is switched on under Settings → Agents.
 - **No usage numbers.** Claude Code only sends them on Pro and Max plans, after the first reply of a session.
 - **Jump only brings the app forward.** Pane-level jumping works for WezTerm and tmux; other terminals are activated as a whole.
 
