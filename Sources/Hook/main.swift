@@ -40,6 +40,11 @@ case "always":
     // Same as Claude's "Yes, and don't ask again": apply the rules it suggested.
     decision = ["behavior": "allow", "updatedPermissions": event["permission_suggestions"] ?? []]
 case "deny": decision = ["behavior": "deny", "message": "Denied from Notch Island"]
+case "answer":
+    // AskUserQuestion answered from the notch: the tool runs with the picked options filled in.
+    var input = event["tool_input"] as? [String: Any] ?? [:]
+    input["answers"] = answer?["answers"] ?? [:]
+    decision = ["behavior": "allow", "updatedInput": input]
 default: exit(0)
 }
 let output: [String: Any] = ["hookSpecificOutput": ["hookEventName": "PermissionRequest", "decision": decision]]
