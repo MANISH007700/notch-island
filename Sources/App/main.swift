@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import SwiftUI
 
@@ -22,7 +23,7 @@ final class HitArea {
 }
 
 // The panel is a fixed transparent canvas so the island can animate freely inside it.
-let canvasSize = CGSize(width: 760, height: 720)
+let canvasSize = CGSize(width: 1200, height: 900)
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -57,12 +58,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.screenChanged() }
             .store(in: &observers)
         store.$expanded.sink { [weak self] open in if !open { self?.openedByHover = false } }.store(in: &observers)
+        installHotKeyHandler()
+        store.$sessions.sink { [weak self] _ in DispatchQueue.main.async { self?.updateHotKeys() } }.store(in: &observers)
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.updateHotKeys() } }.store(in: &observers)
         // Only the island itself takes the mouse; everywhere else clicks go to the apps underneath.
         NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
             Task { @MainActor in self?.updateMousePassThrough() }
         }
         NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
             self?.updateMousePassThrough()
+            return event
+        }
+        // A drag may end outside the island; hand the mouse back once the button is up.
+        NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+            DispatchQueue.main.async { self?.updateMousePassThrough() }
             return event
         }
         // Clicks anywhere else close the island.
@@ -89,7 +99,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func updateMousePassThrough() {
         let mouse = NSEvent.mouseLocation
         let point = CGPoint(x: mouse.x - panel.frame.minX, y: panel.frame.maxY - mouse.y)
-        let inside = hit.rect.insetBy(dx: -2, dy: -2).contains(point)
+        // While a button is held (dragging an edge to resize), keep the mouse even outside the island.
+        let dragging = NSEvent.pressedMouseButtons != 0 && !panel.ignoresMouseEvents
+        let inside = dragging || hit.rect.insetBy(dx: -2, dy: -2).contains(point)
+        if dragging { openedByHover = false }  // resizing a hover-opened island keeps it open
         if panel.ignoresMouseEvents == inside { panel.ignoresMouseEvents = !inside }
         if inside != pointerInside {
             pointerInside = inside
@@ -118,6 +131,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hoverWork = work
         // Short enough to feel instant, long enough that sweeping past the notch does not open it.
         DispatchQueue.main.asyncAfter(deadline: .now() + (inside ? 0.06 : 0.12), execute: work)
+    }
+
+    // ⌘Y allows and ⌘N denies the newest approval, ⌘1-⌘4 pick an answer to a single question.
+    // Registered only while such a request waits, so the keys work as usual everywhere else.
+    var hotKeys: [EventHotKeyRef] = []
+    var hotKeySet = ""
+
+    func installHotKeyHandler() {
+        hotKeyTarget = self
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var id = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &id)
+            let key = id.id
+            DispatchQueue.main.async { MainActor.assumeIsolated { hotKeyTarget?.hotKeyPressed(key) } }
+            return noErr
+        }, 1, &spec, nil, nil)
+    }
+
+    var newestPending: Session? { store.ordered.first { $0.pending != nil } }
+
+    func updateHotKeys() {
+        var keys: [(id: UInt32, code: Int)] = []
+        if Pref.on(Pref.shortcuts), let p = newestPending?.pending {
+            if p.questions.isEmpty {
+                keys = [(1, kVK_ANSI_Y), (2, kVK_ANSI_N)]
+            } else if p.questions.count == 1 && !p.questions[0].multi {
+                keys = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4].prefix(p.questions[0].options.count).enumerated().map { (UInt32(10 + $0.offset), $0.element) }
+            }
+        }
+        let set = keys.map { "\($0.id)" }.joined(separator: ",")
+        guard set != hotKeySet else { return }
+        hotKeySet = set
+        hotKeys.forEach { UnregisterEventHotKey($0) }
+        hotKeys = keys.compactMap { key in
+            var ref: EventHotKeyRef?
+            RegisterEventHotKey(UInt32(key.code), UInt32(cmdKey), EventHotKeyID(signature: OSType(0x4E49534C), id: key.id),  // 'NISL'
+                                GetApplicationEventTarget(), 0, &ref)
+            return ref
+        }
+    }
+
+    func hotKeyPressed(_ key: UInt32) {
+        guard let s = newestPending, let p = s.pending else { return }
+        switch key {
+        case 1: store.respond(s.id, "allow")
+        case 2: store.respond(s.id, "deny")
+        case 10...13 where p.questions.count == 1 && Int(key - 10) < p.questions[0].options.count:
+            store.respond(s.id, "answer", answers: [p.questions[0].text: p.questions[0].options[Int(key - 10)].label])
+        default: break
+        }
     }
 
     // Test seam (no clicks or screen recording needed): USR1 toggles the island,
@@ -173,6 +238,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               width: canvasSize.width, height: canvasSize.height), display: true)
     }
 }
+
+@MainActor var hotKeyTarget: AppDelegate?
 
 func startServer(_ store: Store) {
     try? FileManager.default.createDirectory(atPath: islandDir + "/run", withIntermediateDirectories: true)
