@@ -56,6 +56,20 @@ check("_terminal" in seen and "_agent_pid" in seen, "hook adds terminal and agen
 out, _, _, _ = run("always")
 d = json.loads(out)["hookSpecificOutput"]["decision"]
 check(d["behavior"] == "allow" and d["updatedPermissions"] == req["permission_suggestions"], "always allow applies Claude's suggested rules")
+ask_q = {"session_id": "debug-1", "hook_event_name": "PermissionRequest", "tool_name": "AskUserQuestion",
+         "tool_input": {"questions": [{"question": "Which db?", "header": "DB", "options": [{"label": "Postgres"}, {"label": "SQLite"}]}]}}
+seen = {}
+server = socket.socket(socket.AF_UNIX); server.bind(path); server.listen(1)
+def answer():
+    conn, _ = server.accept()
+    while not conn.recv(65536).endswith(b"\n"): pass
+    conn.sendall(b'{"answers":{"Which db?":"SQLite"},"behavior":"answer"}\n'); conn.close()
+t = threading.Thread(target=answer); t.start()
+p = subprocess.run([hook], input=json.dumps(ask_q).encode(), capture_output=True, timeout=10)
+t.join(); server.close(); os.unlink(path)
+d = json.loads(p.stdout)["hookSpecificOutput"]["decision"]
+check(d["behavior"] == "allow" and d["updatedInput"]["answers"] == {"Which db?": "SQLite"}
+      and d["updatedInput"]["questions"] == ask_q["tool_input"]["questions"], "answering a question fills in the tool's answers")
 out, _, _, _ = run("deny")
 check(json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "deny", "deny")
 out, code, _, _ = run("ask")

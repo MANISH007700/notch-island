@@ -13,6 +13,19 @@ check(cleanPrompt("  Fix the build\nsecond line ") == "Fix the build", "prompt k
 check(cleanPrompt("<task-notification><task-id>x</task-id></task-notification>") == nil, "injected task notification is not a prompt")
 check(cleanPrompt("<command-name>/compact</command-name> <command-args></command-args>") == "/compact", "slash command shows as its name")
 check(cleanPrompt("   ") == nil, "blank prompt ignored")
+check(cleanPrompt("[Image #9] get some inspiration") == "get some inspiration", "attachment placeholders are dropped")
+check(cleanPrompt("[Pasted text #2 +40 lines]") == "Sent an attachment", "a prompt that is only an attachment says so")
+check(describeError("rate_limit") == "Rate limit reached" && describeError("weird_thing") == "Weird Thing" && describeError(nil) == "Turn failed",
+      "error codes read as words")
+let qs = parseQuestions(["questions": [["question": "Which db?", "header": "DB", "multiSelect": true,
+                                         "options": [["label": "Postgres", "description": "Server"], ["label": "SQLite"]]]]])
+check(qs.count == 1 && qs[0].options.map(\.label) == ["Postgres", "SQLite"] && qs[0].options[0].detail == "Server" && qs[0].multi,
+      "question options are read from AskUserQuestion")
+let d = diffLines("Edit", ["old_string": "a\nb\nc", "new_string": "a\nB\nc"])
+check(d.map(\.text) == ["b", "B"] && d.map(\.added) == [false, true], "an edit shows only the changed lines")
+let codexLine = #"{"type":"event_msg","payload":{"info":{},"rate_limits":{"primary":{"used_percent":25.0,"window_minutes":43200,"resets_at":1794941575},"secondary":{"used_percent":4.5,"window_minutes":300,"resets_at":1794941000}}}}"#
+check(codexLimits(codexLine) == [Limit(label: "30d", percent: 25, resetsAt: 1794941575), Limit(label: "5h", percent: 4.5, resetsAt: 1794941000)],
+      "Codex usage windows are read from its log line and labelled by length")
 check(shortPath(home + "/Desktop/x.txt") == "~/Desktop/x.txt", "home shortened to ~")
 check(shortPath("/private/tmp/a/b/c/d.output") == "…/b/c/d.output", "long path keeps the last 3 parts")
 

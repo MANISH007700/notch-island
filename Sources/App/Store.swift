@@ -9,6 +9,20 @@ struct Pending {
     let canAlways: Bool
     let fd: Int32
     let watcher: DispatchSourceRead
+    var questions: [Question] = []  // AskUserQuestion, answered from the notch
+    var diff: [DiffLine] = []       // Edit, MultiEdit, Write
+}
+
+struct Question {
+    let text: String
+    let header: String
+    let options: [(label: String, detail: String)]
+    let multi: Bool
+}
+
+struct DiffLine {
+    let added: Bool
+    let text: String
 }
 
 struct Session: Identifiable {
@@ -33,9 +47,11 @@ struct Session: Identifiable {
     }
 }
 
-struct Usage {
-    var fiveHour: (percent: Double, resetsAt: Double)?
-    var sevenDay: (percent: Double, resetsAt: Double)?
+// One plan-usage window of one agent, like Claude's "5h" or Codex's "30d".
+struct Limit: Equatable {
+    let label: String
+    let percent: Double
+    let resetsAt: Double
 }
 
 // Settings, kept in UserDefaults. The views bind to the same keys with @AppStorage.
@@ -44,9 +60,10 @@ enum Pref {
     static let openForApprovals = "openForApprovals"
     static let approveInNotch = "approveInNotch"
     static let showUsage = "showUsage"
+    static let shortcuts = "shortcuts"
     static let agents = ["claude", "codex", "opencode"]
     static func agent(_ name: String) -> String { "agent." + name }
-    static let defaults: [String: Any] = [openOnHover: true, openForApprovals: true, approveInNotch: true, showUsage: true]
+    static let defaults: [String: Any] = [openOnHover: true, openForApprovals: true, approveInNotch: true, showUsage: true, shortcuts: true]
 
     static func on(_ key: String) -> Bool { UserDefaults.standard.object(forKey: key) as? Bool ?? defaults[key] as? Bool ?? true }
 }
@@ -95,7 +112,7 @@ enum Sound: String, CaseIterable {
 final class Store: ObservableObject {
     @Published var sessions: [String: Session] = [:]
     @Published var expanded = false
-    @Published var usage = Usage()
+    @Published var limits: [String: [Limit]] = [:]  // by agent
     @Published var muted = UserDefaults.standard.bool(forKey: "muted") {
         didSet { UserDefaults.standard.set(muted, forKey: "muted") }
     }
@@ -151,8 +168,10 @@ final class Store: ObservableObject {
         case "PermissionRequest":
             dropPending(&s)
             let tool = e["tool_name"] as? String ?? "Tool"
-            if tool == "AskUserQuestion" || !Pref.on(Pref.approveInNotch) {
-                // Questions need the terminal's own picker; just flag the session.
+            let input = e["tool_input"] as? [String: Any] ?? [:]
+            let questions = tool == "AskUserQuestion" ? parseQuestions(input) : []
+            if !Pref.on(Pref.approveInNotch) || (tool == "AskUserQuestion" && questions.isEmpty) {
+                // Left to the terminal's own prompt; just flag the session.
                 close(fd)
                 s.status = .waiting
                 s.tool = tool
@@ -160,6 +179,8 @@ final class Store: ObservableObject {
             } else {
                 let always = !((e["permission_suggestions"] as? [Any]) ?? []).isEmpty
                 s.pending = watch(fd, tool: tool, detail: detail(e), canAlways: always, session: id)
+                s.pending?.questions = questions
+                s.pending?.diff = diffLines(tool, input)
                 s.status = .waiting
                 if Pref.on(Pref.openForApprovals) { expanded = true }
             }
@@ -182,7 +203,7 @@ final class Store: ObservableObject {
             dropPending(&s)
             s.status = .failed
             s.tool = nil
-            s.activity = e["error"] as? String ?? "Turn failed"
+            s.activity = describeError(e["error"] as? String)
             play((e["error"] as? String ?? "").contains("rate_limit") ? .limit : .failed)
         case "SessionEnd":
             dropPending(&s)
@@ -199,9 +220,14 @@ final class Store: ObservableObject {
     }
 
     // behavior: "allow", "always", "deny" or "ask" (let the terminal show its own prompt).
-    func respond(_ id: String, _ behavior: String) {
+    // behavior "answer" carries the picked option per question (AskUserQuestion).
+    func respond(_ id: String, _ behavior: String, answers: [String: String] = [:]) {
         guard var s = sessions[id], let p = s.pending else { return }
-        writeAll(p.fd, Data("{\"behavior\":\"\(behavior)\"}\n".utf8))
+        var reply: [String: Any] = ["behavior": behavior]
+        if behavior == "answer" { reply["answers"] = answers }
+        var line = (try? JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys])) ?? Data()
+        line.append(0x0A)
+        writeAll(p.fd, line)
         p.watcher.cancel()
         s.pending = nil
         s.status = behavior == "deny" ? .idle : .working
@@ -281,27 +307,34 @@ final class Store: ObservableObject {
         }
     }
 
+    // Claude's limits come from the status line copy, Codex's from its own session logs.
     func readUsage() {
-        guard let data = FileManager.default.contents(atPath: statuslinePath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let limits = json["rate_limits"] as? [String: Any] else { return }
-        func window(_ key: String) -> (Double, Double)? {
-            guard let w = limits[key] as? [String: Any], let p = w["used_percentage"] as? Double else { return nil }
-            let reset = w["resets_at"] as? Double ?? 0
-            return reset > Date().timeIntervalSince1970 ? (p, reset) : nil
+        var next: [String: [Limit]] = [:]
+        if let data = FileManager.default.contents(atPath: statuslinePath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let windows = json["rate_limits"] as? [String: Any] {
+            next["claude"] = [("five_hour", "5h"), ("seven_day", "7d")].compactMap { key, label in
+                guard let w = windows[key] as? [String: Any], let p = w["used_percentage"] as? Double else { return nil }
+                return Limit(label: label, percent: p, resetsAt: w["resets_at"] as? Double ?? 0)
+            }
         }
-        let next = Usage(fiveHour: window("five_hour"), sevenDay: window("seven_day"))
+        next["codex"] = latestCodexLimits()
+        let now = Date().timeIntervalSince1970
+        next = next.mapValues { $0.filter { $0.resetsAt > now } }.filter { !$0.value.isEmpty }
         // Chime once as a window crosses 90%; not on launch, when there is nothing to compare with.
-        func crossed(_ old: (percent: Double, resetsAt: Double)?, _ new: (percent: Double, resetsAt: Double)?) -> Bool {
-            guard let old, let new else { return false }
-            return old.percent < 90 && new.percent >= 90
+        let crossed = next.contains { agent, windows in
+            windows.contains { new in
+                (limits[agent]?.first { $0.label == new.label }).map { $0.percent < 90 && new.percent >= 90 } ?? false
+            }
         }
-        if crossed(usage.fiveHour, next.fiveHour) || crossed(usage.sevenDay, next.sevenDay) { play(.limit) }
-        usage = next
+        if crossed { play(.limit) }
+        if next != limits { limits = next }
     }
 
+    // A file named after the event in ~/.notch-island/sounds (done.wav, needsYou.aiff, ...) replaces the system sound.
     func play(_ sound: Sound) {
-        if !muted && Pref.on(sound.key) { NSSound(named: NSSound.Name(sound.file))?.play() }
+        guard !muted && Pref.on(sound.key) else { return }
+        (customSound(sound) ?? NSSound(named: NSSound.Name(sound.file)))?.play()
     }
 
     private func dropPending(_ s: inout Session) {
@@ -347,7 +380,10 @@ final class Store: ObservableObject {
 func cleanPrompt(_ prompt: String?) -> String? {
     guard let p = prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty else { return nil }
     if let match = p.firstMatch(of: #/<command-name>(.*?)</command-name>/#) { return String(match.1) }
-    return p.hasPrefix("<") ? nil : firstLine(p)
+    if p.hasPrefix("<") { return nil }
+    // Attachment placeholders like "[Image #9]" or "[Pasted text #2 +40 lines]" are noise on a card.
+    let text = firstLine(p.replacing(#/\[(Image|Pasted text) #\d+[^\]]*\]\s*/#, with: "")).trimmingCharacters(in: .whitespaces)
+    return text.isEmpty ? "Sent an attachment" : text
 }
 
 func firstLine(_ s: String) -> String {
@@ -407,4 +443,87 @@ private func texts(_ json: [String: Any]) -> [String] {
     let content = (json["message"] as? [String: Any])?["content"]
     if let text = content as? String { return [text] }
     return (content as? [[String: Any]] ?? []).compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+}
+
+// Codex logs its plan usage into every session file (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl);
+// the newest file's last "rate_limits" entry is the current state.
+func latestCodexLimits() -> [Limit] {
+    let fm = FileManager.default
+    var dir = home + "/.codex/sessions"
+    for _ in 0..<3 {  // year, month, day: the newest of each sorts last
+        guard let newest = (try? fm.contentsOfDirectory(atPath: dir))?.filter({ !$0.hasPrefix(".") }).max() else { return [] }
+        dir += "/" + newest
+    }
+    let files = ((try? fm.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".jsonl") }.map { dir + "/" + $0 }
+    let modified = { (path: String) in (try? fm.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? .distantPast }
+    guard let file = files.max(by: { modified($0) < modified($1) }), let handle = FileHandle(forReadingAtPath: file) else { return [] }
+    defer { try? handle.close() }
+    let size = (try? handle.seekToEnd()) ?? 0
+    try? handle.seek(toOffset: size > 262_144 ? size - 262_144 : 0)  // the tail is enough
+    let tail = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+    for line in tail.split(separator: "\n").reversed() where line.contains("\"rate_limits\":{") {
+        if let limits = codexLimits(String(line)) { return limits }
+    }
+    return []
+}
+
+// One Codex log line -> its usage windows: primary and secondary, labelled by their length.
+func codexLimits(_ line: String) -> [Limit]? {
+    func find(_ any: Any) -> [String: Any]? {
+        if let d = any as? [String: Any] {
+            if let r = d["rate_limits"] as? [String: Any] { return r }
+            for v in d.values { if let r = find(v) { return r } }
+        }
+        return nil
+    }
+    guard let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)), let r = find(json) else { return nil }
+    return ["primary", "secondary"].compactMap { key in
+        guard let w = r[key] as? [String: Any], let p = w["used_percent"] as? Double,
+              let minutes = w["window_minutes"] as? Int, let reset = w["resets_at"] as? Double else { return nil }
+        return Limit(label: minutes < 1440 ? "\(minutes / 60)h" : "\(minutes / 1440)d", percent: p, resetsAt: reset)
+    }
+}
+
+// Claude Code's StopFailure error codes, in words.
+func describeError(_ code: String?) -> String {
+    guard let code, !code.isEmpty else { return "Turn failed" }
+    let known = ["rate_limit": "Rate limit reached", "authentication_failed": "Not signed in", "billing_error": "Billing problem",
+                 "invalid_request": "Invalid request", "server_error": "Server error", "max_output_tokens": "Reply hit the output limit"]
+    return known[code] ?? code.replacingOccurrences(of: "_", with: " ").capitalized(with: nil)
+}
+
+func customSound(_ sound: Sound) -> NSSound? {
+    for ext in ["aiff", "wav", "mp3", "m4a", "caf"] {
+        let path = islandDir + "/sounds/" + sound.rawValue + "." + ext
+        if FileManager.default.fileExists(atPath: path) { return NSSound(contentsOfFile: path, byReference: true) }
+    }
+    return nil
+}
+
+// AskUserQuestion's input: {"questions": [{"question", "header", "options": [{"label", "description"}], "multiSelect"}]}.
+func parseQuestions(_ input: [String: Any]) -> [Question] {
+    ((input["questions"] as? [[String: Any]]) ?? []).compactMap { q in
+        guard let text = q["question"] as? String else { return nil }
+        let options = ((q["options"] as? [[String: Any]]) ?? []).compactMap { o in
+            (o["label"] as? String).map { ($0, o["description"] as? String ?? "") }
+        }
+        return options.isEmpty ? nil : Question(text: text, header: q["header"] as? String ?? "", options: options, multi: q["multiSelect"] as? Bool ?? false)
+    }
+}
+
+// The lines a file edit removes and adds; lines both sides share at the start and end are left out.
+func diffLines(_ tool: String, _ input: [String: Any]) -> [DiffLine] {
+    func lines(_ s: String?) -> [String] { s.map { $0.components(separatedBy: "\n") } ?? [] }
+    func edit(_ old: String?, _ new: String?) -> [DiffLine] {
+        var a = lines(old), b = lines(new)
+        while let x = a.first, let y = b.first, x == y { a.removeFirst(); b.removeFirst() }
+        while let x = a.last, let y = b.last, x == y { a.removeLast(); b.removeLast() }
+        return a.map { DiffLine(added: false, text: $0) } + b.map { DiffLine(added: true, text: $0) }
+    }
+    switch tool {
+    case "Edit": return edit(input["old_string"] as? String, input["new_string"] as? String)
+    case "MultiEdit": return ((input["edits"] as? [[String: Any]]) ?? []).flatMap { edit($0["old_string"] as? String, $0["new_string"] as? String) }
+    case "Write": return lines(input["content"] as? String).map { DiffLine(added: true, text: $0) }
+    default: return []
+    }
 }
