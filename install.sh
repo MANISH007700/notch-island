@@ -12,6 +12,11 @@ CLAUDE="$HOME/.claude/settings.json"
 CODEX="$HOME/.codex/hooks.json"
 OPENCODE_PLUGIN="$HOME/.config/opencode/plugins/notch-island.js"
 
+# Green check marks when printing to a terminal, plain text otherwise.
+if [ -t 1 ]; then GREEN=$(printf '\033[32m'); DIM=$(printf '\033[2m'); BOLD=$(printf '\033[1m'); RESET=$(printf '\033[0m')
+else GREEN=; DIM=; BOLD=; RESET=; fi
+ok() { printf '  %s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
+
 # edit_hooks <file> <install|uninstall> <claude|codex>
 edit_hooks() {
   [ -f "$1" ] || echo '{}' > "$1"
@@ -81,14 +86,22 @@ if [ "${1:-}" = "uninstall" ]; then
   [ -f "$CLAUDE" ] && edit_hooks "$CLAUDE" uninstall claude
   [ -f "$CODEX" ] && edit_hooks "$CODEX" uninstall codex
   rm -rf "$APP" "$BIN" "$AGENT" "$OPENCODE_PLUGIN"
-  echo "Notch Island removed. Each config's pre-install copy is next to it, ending in .bak-notch-island."
+  ok "Notch Island removed"
+  printf '  %sEach config%ss pre-install copy is next to it, ending in .bak-notch-island.%s\n' "$DIM" "'" "$RESET"
   exit 0
 fi
 
-echo "Building..."
+if ! command -v swiftc >/dev/null 2>&1; then
+  echo "Notch Island is built from source and needs the Xcode Command Line Tools."
+  echo "Install them with:  xcode-select --install   then run ./install.sh again."
+  exit 1
+fi
+
+printf '%sNotch Island%s\n' "$BOLD" "$RESET"
 mkdir -p build
 swiftc -O Sources/Shared/*.swift Sources/Hook/main.swift -o build/notch-island-hook
 swiftc -O Sources/Shared/*.swift Sources/App/*.swift -o build/NotchIsland
+ok "Built from source"
 
 stop_app
 rm -rf "$APP"
@@ -98,18 +111,19 @@ cp build/notch-island-hook "$APP/Contents/Helpers/"
 cp Info.plist "$APP/Contents/"
 codesign --force --deep --sign - "$APP" >/dev/null 2>&1
 ln -sf "$APP/Contents/Helpers/notch-island-hook" "$BIN/notch-island-hook"
+ok "Installed to ~/Applications/Notch Island.app"
 
 mkdir -p "$HOME/.claude"
 edit_hooks "$CLAUDE" install claude
-echo "Claude Code: hooks added."
+ok "Claude Code connected"
 if [ -d "$HOME/.codex" ]; then
   edit_hooks "$CODEX" install codex
-  echo "Codex: hooks added. Open Codex and approve them once with /hooks."
+  ok "Codex connected  ${DIM}(first time: open Codex, run /hooks and approve the Notch Island entries)${RESET}"
 fi
 if [ -d "$HOME/.config/opencode" ]; then
   mkdir -p "$(dirname "$OPENCODE_PLUGIN")"
   cp integrations/opencode/notch-island.js "$OPENCODE_PLUGIN"
-  echo "OpenCode: plugin added."
+  ok "OpenCode connected"
 fi
 
 cat > "$AGENT" <<EOF
@@ -125,4 +139,6 @@ cat > "$AGENT" <<EOF
 </plist>
 EOF
 launchctl bootstrap "gui/$(id -u)" "$AGENT"
-echo "Notch Island is running. Click the notch to open it."
+ok "Running, and starts at login"
+echo
+echo "Hover or click the notch to open it. Settings are behind the gear icon."

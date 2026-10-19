@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .sink { [weak self] _ in self?.screenChanged() }
             .store(in: &observers)
+        store.$expanded.sink { [weak self] open in if !open { self?.openedByHover = false } }.store(in: &observers)
         // Only the island itself takes the mouse; everywhere else clicks go to the apps underneath.
         NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
             Task { @MainActor in self?.updateMousePassThrough() }
@@ -90,6 +91,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let point = CGPoint(x: mouse.x - panel.frame.minX, y: panel.frame.maxY - mouse.y)
         let inside = hit.rect.insetBy(dx: -2, dy: -2).contains(point)
         if panel.ignoresMouseEvents == inside { panel.ignoresMouseEvents = !inside }
+        if inside != pointerInside {
+            pointerInside = inside
+            hoverChanged(inside)
+        }
+    }
+
+    // Open on hover after a short rest; close on leaving, but only if hover opened it and nothing waits for an answer.
+    var pointerInside = false
+    var openedByHover = false
+    var hoverWork: DispatchWorkItem?
+    func hoverChanged(_ inside: Bool) {
+        hoverWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let store = self.store
+                if inside, !store.expanded, Pref.on(Pref.openOnHover) {
+                    store.expanded = true
+                    self.openedByHover = true
+                } else if !inside, store.expanded, self.openedByHover, !store.sessions.values.contains(where: { $0.pending != nil }) {
+                    store.expanded = false
+                }
+            }
+        }
+        hoverWork = work
+        // Short enough to feel instant, long enough that sweeping past the notch does not open it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + (inside ? 0.06 : 0.12), execute: work)
     }
 
     // Test seam (no clicks or screen recording needed): USR1 toggles the island,

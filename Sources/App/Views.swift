@@ -1,8 +1,9 @@
 import SwiftUI
 
-let spring = Animation.spring(response: 0.42, dampingFraction: 0.8)
+let spring = Animation.spring(response: 0.3, dampingFraction: 0.86)
 let mono = Font.system(size: 11.5, design: .monospaced)
 let expandedWidth: CGFloat = 640
+let visibleCards = 5  // more than this scroll
 
 // MARK: - Island
 
@@ -13,6 +14,10 @@ struct IslandView: View {
     let onHitChange: () -> Void
     @State private var hovering = false
     @State private var listHeight: CGFloat = 0
+    @State private var cardHeights: [String: CGFloat] = [:]
+    @State private var settingsHeight: CGFloat = 0
+    @State private var showingSettings = false
+    @AppStorage(Pref.showUsage) private var showUsage = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,6 +46,10 @@ struct IslandView: View {
         .padding(.horizontal, ear)
         .background(Color.black)
         .clipShape(NotchShape(ear: ear, radius: expanded ? 26 : 11))
+        // A hairline around the open island; masked off along the top so it never draws across the menu bar.
+        .overlay(NotchShape(ear: ear, radius: expanded ? 26 : 11).stroke(Color.white.opacity(expanded ? 0.09 : 0), lineWidth: 1)
+            .mask(VStack(spacing: 0) { Color.clear.frame(height: notch.height); Color.black }))
+        .onChange(of: expanded) { if !expanded { showingSettings = false } }
         .shadow(color: .black.opacity(expanded ? 0.5 : 0), radius: 22, y: 12)
         .scaleEffect(hovering && !expanded ? CGSize(width: 1.04, height: 1.1) : CGSize(width: 1, height: 1), anchor: .top)
         .onHover { h in withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { hovering = h } }
@@ -60,13 +69,13 @@ struct IslandView: View {
         let waiting = sessions.filter { $0.status == .waiting }.count
         return HStack(spacing: 0) {
             if let top {
-                StatusIcon(status: top.status, size: 13).frame(width: wing)
+                StatusIcon(status: top.status, size: 15).frame(width: wing)
             }
             Color.clear.frame(width: notch.width)
             if !sessions.isEmpty {
                 Text("\(waiting > 0 ? waiting : sessions.count)")
                     .font(.system(size: 12.5, weight: .bold, design: .rounded).monospacedDigit())
-                    .foregroundStyle(waiting > 0 ? Color.orange : Color.white.opacity(0.85))
+                    .foregroundStyle(waiting > 0 ? Status.waiting.color : Color.white.opacity(0.85))
                     .contentTransition(.numericText())
                     .frame(width: wing)
             }
@@ -81,25 +90,45 @@ struct IslandView: View {
     var expandedContent: some View {
         VStack(spacing: 6) {
             header
-            if store.sessions.isEmpty {
+            if showingSettings {
+                ScrollView(.vertical) {
+                    SettingsView(store: store)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { settingsHeight = $0 }
+                }
+                .frame(height: min(settingsHeight, canvasSize.height - notch.height - 120))
+                .transition(.opacity)
+            } else if store.sessions.isEmpty {
                 EmptyState()
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 8) {
+                ScrollView(.vertical, showsIndicators: store.ordered.count > visibleCards) {
+                    VStack(spacing: 10) {
                         ForEach(store.ordered) { session in
                             SessionCard(session: session, store: store)
+                                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { cardHeights[session.id] = $0 }
                                 .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
                         }
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 14)
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { listHeight = $0 }
                 }
-                .frame(height: min(listHeight, canvasSize.height - notch.height - 120))
+                .frame(height: min(listHeight, firstCardsHeight, canvasSize.height - notch.height - 120))
+                if store.ordered.count > visibleCards {
+                    Text("+\(store.ordered.count - visibleCards) more · scroll").font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.4))
+                        .padding(.top, 2)
+                }
             }
         }
-        .padding(.bottom, 12)
+        .padding(.bottom, 14)
         .frame(width: expandedWidth)
         .animation(.spring(response: 0.35, dampingFraction: 0.86), value: layoutKey)
+        .animation(.easeOut(duration: 0.18), value: showingSettings)
+    }
+
+    // Room for the first few cards; the rest scroll.
+    var firstCardsHeight: CGFloat {
+        let shown = store.ordered.prefix(visibleCards)
+        guard store.ordered.count > visibleCards else { return .infinity }
+        return shown.reduce(0) { $0 + (cardHeights[$1.id] ?? 0) } + CGFloat(shown.count - 1) * 10
     }
 
     // Anything that changes a card's size or order animates.
@@ -109,16 +138,23 @@ struct IslandView: View {
 
     var header: some View {
         HStack(spacing: 4) {
-            HStack(spacing: 14) {
-                if let w = store.usage.fiveHour { UsageMeter(label: "5h", percent: w.percent, resetsAt: w.resetsAt) }
-                if let w = store.usage.sevenDay { UsageMeter(label: "7d", percent: w.percent, resetsAt: w.resetsAt) }
+            if showingSettings {
+                Text("Settings").font(.system(size: 13, weight: .semibold))
+            } else if showUsage {
+                HStack(spacing: 22) {
+                    if let w = store.usage.fiveHour { UsageMeter(label: "5h", percent: w.percent, resetsAt: w.resetsAt) }
+                    if let w = store.usage.sevenDay { UsageMeter(label: "7d", percent: w.percent, resetsAt: w.resetsAt) }
+                }
             }
             Spacer(minLength: notch.width + 16)
-            IconButton(symbol: store.muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+            IconButton(symbol: store.muted ? "speaker.slash" : "speaker.wave.2",
                        help: store.muted ? "Unmute sounds" : "Mute sounds") { store.muted.toggle() }
+            IconButton(symbol: "gearshape", help: showingSettings ? "Back to sessions" : "Settings", active: showingSettings) {
+                showingSettings.toggle()
+            }
             IconButton(symbol: "power", help: "Quit Notch Island") { NSApp.terminate(nil) }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 20)
         .frame(height: notch.height)
         .contentShape(Rectangle())
         .onTapGesture { store.expanded = false }
@@ -159,32 +195,28 @@ struct SessionCard: View {
     @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 9) {
-                StatusIcon(status: session.status, size: 14)
-                Text("\(Text(session.project).foregroundStyle(.white.opacity(0.5)))  \(title)")
-                    .font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 11) {
+                StatusIcon(status: session.status, size: 16)
+                Text("\(Text(session.project).foregroundStyle(.white.opacity(0.45)))\(Text("  /  ").foregroundStyle(.white.opacity(0.22)))\(Text(title).fontWeight(.semibold))")
+                    .font(.system(size: 13.5))
                     .lineLimit(1)
-                Spacer(minLength: 6)
+                Spacer(minLength: 8)
                 if hovering {
                     IconButton(symbol: "xmark", help: "Hide this session") { store.archive(session.id) }
                         .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    Text(ago(session.updated)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.white.opacity(0.5))
+                    Text(ago(session.updated)).font(.system(size: 12).monospacedDigit()).foregroundStyle(.white.opacity(0.45))
                 }
-                Tag(text: agentName(session.agent), color: agentColor(session.agent))
-                if let name = session.terminalName { Tag(text: name) }
-                IconButton(symbol: "arrow.up.forward", help: "Jump to the terminal") {
-                    jump(session)
-                    store.expanded = false
-                }
+                AgentLabel(agent: session.agent)
             }
 
-            VStack(alignment: .leading, spacing: 7) {
+            // Left out when empty, or its spacing pads a title-only card.
+            if hasDetails { VStack(alignment: .leading, spacing: 9) {
                 if session.title != nil, let prompt = session.lastPrompt {
-                    Text("\(Text("You").bold().foregroundStyle(.white.opacity(0.5)))  \(Text(prompt).foregroundStyle(.white.opacity(0.6)))")
-                        .font(.system(size: 12))
+                    Text("\(Text("You").foregroundStyle(.white.opacity(0.8)))\(Text(" · ").foregroundStyle(.white.opacity(0.3)))\(Text(prompt).foregroundStyle(.white.opacity(0.5)))")
+                        .font(.system(size: 12.5))
                         .lineLimit(1)
                 }
                 if let tool = session.tool, session.status == .working || session.status == .waiting {
@@ -200,14 +232,15 @@ struct SessionCard: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .padding(.leading, 25)
+            .padding(.leading, 29) }
         }
-        .padding(.horizontal, 13)
-        .padding(.vertical, 11)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.white.opacity(hovering ? 0.085 : 0.055)))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(session.status == .waiting ? Color.orange.opacity(0.45) : Color.white.opacity(0.06)))
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.white.opacity(hovering ? 0.1 : 0.055)))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .strokeBorder(session.status == .waiting ? Status.waiting.color.opacity(0.45) : Color.white.opacity(hovering ? 0.16 : 0.04)))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .help(session.terminalName.map { "Click to jump to \($0)" } ?? "Click to jump to the terminal")
         .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
         .onTapGesture {
             jump(session)
@@ -218,6 +251,11 @@ struct SessionCard: View {
     var title: String {
         session.title ?? session.lastPrompt ?? "New session"
     }
+
+    var hasDetails: Bool {
+        (session.title != nil && session.lastPrompt != nil) || session.tool != nil || session.activity != nil
+            || session.lastMessage != nil || session.pending != nil
+    }
 }
 
 struct ToolRow: View {
@@ -226,16 +264,18 @@ struct ToolRow: View {
     let color: Color
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: toolIcon(tool)).font(.system(size: 10, weight: .bold)).foregroundStyle(color)
-            Text(toolLabel(tool)).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(color)
+        HStack(spacing: 8) {
+            Image(systemName: toolIcon(tool)).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(color)
+            Text(toolLabel(tool)).font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(color)
             if let text {
-                Text(text).font(mono).foregroundStyle(.white.opacity(0.6)).lineLimit(1).truncationMode(.middle)
+                Text(text).font(mono).foregroundStyle(.white.opacity(0.55)).lineLimit(1).truncationMode(.middle)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 5)
-        .background(Capsule().fill(color.opacity(0.1)))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.black.opacity(0.3)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.white.opacity(0.08)))
     }
 }
 
@@ -253,7 +293,7 @@ struct PermissionBox: View {
                 Image(systemName: toolIcon(pending.tool)).font(.system(size: 11, weight: .bold))
                 Text(isPlan ? "Review the plan" : "Allow \(toolLabel(pending.tool))?").font(.system(size: 12.5, weight: .semibold))
             }
-            .foregroundStyle(.orange)
+            .foregroundStyle(Status.waiting.color)
 
             Group {
                 if isPlan {
@@ -295,23 +335,24 @@ struct StatusIcon: View {
             Group {
                 switch status {
                 case .working:
-                    Spinner(color: status.color, size: size)
+                    ZStack {
+                        Circle().strokeBorder(status.color.opacity(0.4), lineWidth: 1.5)
+                        Pulse { Circle().fill(status.color).padding(size * 0.26) }
+                    }
                 case .waiting:
-                    Pulse { Image(systemName: "exclamationmark.circle.fill") }
+                    Badge(symbol: "exclamationmark", color: status.color, size: size, pulsing: true)
                 case .done:
-                    Image(systemName: "checkmark.circle.fill")
+                    Badge(symbol: "checkmark", color: status.color, size: size)
                 case .failed:
-                    Image(systemName: "xmark.circle.fill")
+                    Badge(symbol: "xmark", color: status.color, size: size)
                 case .idle:
-                    Image(systemName: "circle.dashed")
+                    Circle().strokeBorder(status.color.opacity(0.7), lineWidth: 1.2).padding(size * 0.22)
                 }
             }
             .id(status)
             .transition(.scale(scale: 0.4).combined(with: .opacity))
         }
-        .font(.system(size: size, weight: .semibold))
-        .foregroundStyle(status.color)
-        .frame(width: size + 2, height: size + 2)
+        .frame(width: size, height: size)
         .animation(.spring(response: 0.35, dampingFraction: 0.55), value: status)
     }
 }
@@ -324,27 +365,25 @@ struct Pulse<Content: View>: View {
     var body: some View {
         TimelineView(.animation) { context in
             let phase = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.4) / 1.4
-            content.opacity(0.55 + 0.45 * cos(phase * 2 * .pi))
+            content.opacity(0.7 + 0.3 * cos(phase * 2 * .pi))  // never below 40%, so a paused frame still reads
         }
     }
 }
 
-// Driven by the clock rather than a repeating animation, so it never drifts while the island resizes.
-struct Spinner: View {
+// Status glyph on a disc: done, failed, waiting.
+struct Badge: View {
+    let symbol: String
     let color: Color
     let size: CGFloat
+    var pulsing = false
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let turn = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 0.9) / 0.9
-            ZStack {
-                Circle().stroke(color.opacity(0.18), lineWidth: 2)
-                Circle().trim(from: 0, to: 0.3)
-                    .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                    .rotationEffect(.degrees(turn * 360))
-            }
-            .frame(width: size - 2, height: size - 2)
+        // Waiting is solid so it stands out even in the closed notch; the rest are a glyph on a tinted disc.
+        let badge = ZStack {
+            Circle().fill(pulsing ? color : color.opacity(0.18))
+            Image(systemName: symbol).font(.system(size: size * 0.55, weight: .heavy)).foregroundStyle(pulsing ? Color.black : color)
         }
+        if pulsing { Pulse { badge } } else { badge }
     }
 }
 
@@ -353,17 +392,19 @@ struct UsageMeter: View {
     let percent: Double
     let resetsAt: Double
 
-    var color: Color { percent < 50 ? .green : percent < 80 ? .orange : .red }
+    var color: Color {
+        percent < 50 ? Status.done.color : percent < 80 ? Color(red: 0.95, green: 0.55, blue: 0.4) : Status.failed.color
+    }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(label).font(.system(size: 11, weight: .bold)).foregroundStyle(.white.opacity(0.5))
+        HStack(spacing: 8) {
+            Text(label).font(.system(size: 12)).foregroundStyle(.white.opacity(0.5))
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.14))
-                Capsule().fill(color).frame(width: max(4, 28 * min(1, percent / 100)))
+                Capsule().fill(Color.white.opacity(0.12))
+                Capsule().fill(color).frame(width: max(4, 64 * min(1, percent / 100)))
             }
-            .frame(width: 28, height: 5)
-            Text("\(Int(percent.rounded()))%").font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+            .frame(width: 64, height: 4)
+            Text("\(Int(percent.rounded()))%").font(.system(size: 12, weight: .semibold, design: .monospaced))
         }
         .help("\(label == "5h" ? "5-hour" : "7-day") Claude usage, resets in \(remaining(resetsAt))")
     }
@@ -372,16 +413,17 @@ struct UsageMeter: View {
 struct IconButton: View {
     let symbol: String
     let help: String
+    var active = false
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .bold))
-                .frame(width: 24, height: 24)
-                .foregroundStyle(.white.opacity(hovering ? 1 : 0.6))
-                .background(Circle().fill(Color.white.opacity(hovering ? 0.15 : 0)))
+                .font(.system(size: 12.5, weight: .medium))
+                .frame(width: 26, height: 26)
+                .foregroundStyle(.white.opacity(hovering || active ? 1 : 0.6))
+                .background(Circle().fill(Color.white.opacity(active ? 0.16 : hovering ? 0.12 : 0)))
                 .contentShape(Circle())
         }
         .buttonStyle(Pressable())
@@ -442,15 +484,14 @@ struct Pressable: ButtonStyle {
     }
 }
 
-struct Tag: View {
-    let text: String
-    var color = Color.white
+struct AgentLabel: View {
+    let agent: String
 
     var body: some View {
-        Text(text).font(.system(size: 10.5, weight: .semibold))
-            .foregroundStyle(color == .white ? Color.white.opacity(0.55) : color)
-            .padding(.horizontal, 7).padding(.vertical, 3)
-            .background(Capsule().fill(color.opacity(color == .white ? 0.08 : 0.14)))
+        HStack(spacing: 6) {
+            Circle().fill(agentColor(agent)).frame(width: 6, height: 6)
+            Text(agentName(agent)).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
+        }
     }
 }
 
@@ -459,9 +500,133 @@ struct EmptyState: View {
         VStack(spacing: 6) {
             Image(systemName: "sparkles").font(.system(size: 20)).foregroundStyle(.white.opacity(0.4))
             Text("No active sessions").font(.system(size: 13, weight: .semibold))
-            Text("Start claude in any terminal and it shows up here.").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
+            Text("Start Claude Code, Codex or OpenCode and it shows up here.").font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
         }
         .padding(.vertical, 22)
+    }
+}
+
+// MARK: - Settings
+
+struct SettingsView: View {
+    @ObservedObject var store: Store
+    @AppStorage(Pref.openOnHover) private var openOnHover = true
+    @AppStorage(Pref.openForApprovals) private var openForApprovals = true
+    @AppStorage(Pref.approveInNotch) private var approveInNotch = true
+    @AppStorage(Pref.showUsage) private var showUsage = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SettingsGroup(title: "Agents") {
+                ForEach(Pref.agents, id: \.self) { AgentRow(agent: $0, store: store) }
+            }
+            SettingsGroup(title: "Island") {
+                SettingRow(title: "Open on hover", detail: "Rest the pointer on the notch to open it", isOn: $openOnHover)
+                SettingRow(title: "Open when an agent needs you", detail: "Pop open for approvals", isOn: $openForApprovals)
+                SettingRow(title: "Approve from the notch", detail: "Off: approvals stay in the terminal", isOn: $approveInNotch)
+                SettingRow(title: "Plan usage", detail: "Claude's 5-hour and 7-day limits in the header", isOn: $showUsage)
+            }
+            SettingsGroup(title: "Sounds") {
+                SettingRow(title: "All sounds", detail: "Same as the speaker button", isOn: Binding(get: { !store.muted }, set: { store.muted = !$0 }))
+                ForEach(Sound.allCases, id: \.self) { SoundRow(sound: $0, store: store) }
+            }
+        }
+        .padding(.horizontal, 14)
+    }
+}
+
+struct SettingsGroup<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title.uppercased()).font(.system(size: 10.5, weight: .semibold)).kerning(0.6)
+                .foregroundStyle(.white.opacity(0.4)).padding(.leading, 16)
+            VStack(spacing: 0) { content }
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Color.white.opacity(0.055)))
+                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Color.white.opacity(0.04)))
+        }
+    }
+}
+
+struct AgentRow: View {
+    let agent: String
+    @ObservedObject var store: Store
+    @AppStorage private var on: Bool
+
+    init(agent: String, store: Store) {
+        self.agent = agent
+        self.store = store
+        _on = AppStorage(wrappedValue: true, Pref.agent(agent))
+    }
+
+    var body: some View {
+        SettingRow(title: ["claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"][agent] ?? agent,
+                   detail: on ? (agent == "codex" ? "CLI and the Codex app" : "Terminal sessions") : "Ignored, it asks in its own terminal",
+                   dot: agentColor(agent), isOn: $on)
+            .onChange(of: on) { if !on { store.dropAgent(agent) } }
+    }
+}
+
+// Switching one on plays it, so you hear what it sounds like.
+struct SoundRow: View {
+    let sound: Sound
+    @ObservedObject var store: Store
+    @AppStorage private var on: Bool
+
+    init(sound: Sound, store: Store) {
+        self.sound = sound
+        self.store = store
+        _on = AppStorage(wrappedValue: true, sound.key)
+    }
+
+    var body: some View {
+        SettingRow(title: sound.title, detail: "\(sound.detail) · \(sound.file)", isOn: $on)
+            .opacity(store.muted ? 0.45 : 1)
+            .onChange(of: on) { if on { store.play(sound) } }
+    }
+}
+
+struct SettingRow: View {
+    let title: String
+    let detail: String
+    var dot: Color?
+    @Binding var isOn: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let dot { Circle().fill(dot).frame(width: 7, height: 7) }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 13, weight: .medium))
+                Text(detail).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.45))
+            }
+            Spacer(minLength: 12)
+            Switch(isOn: isOn)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.white.opacity(hovering ? 0.05 : 0)).padding(.horizontal, 4))
+        .contentShape(Rectangle())
+        .onHover { h in withAnimation(.easeOut(duration: 0.12)) { hovering = h } }
+        .onTapGesture { withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { isOn.toggle() } }
+        .accessibilityRepresentation { Toggle(title, isOn: $isOn) }
+    }
+}
+
+// Drawn by hand: a system switch looks greyed out in a panel that never becomes key.
+struct Switch: View {
+    let isOn: Bool
+
+    var body: some View {
+        Capsule()
+            .fill(isOn ? Status.done.color : Color.white.opacity(0.16))
+            .frame(width: 32, height: 19)
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle().fill(.white).padding(2).shadow(color: .black.opacity(0.25), radius: 1, y: 1)
+            }
     }
 }
 
@@ -471,8 +636,8 @@ extension Status {
     var color: Color {
         switch self {
         case .idle: .gray
-        case .working: Color(red: 0.35, green: 0.78, blue: 1)
-        case .waiting: .orange
+        case .working: Color(red: 0.35, green: 0.7, blue: 1)
+        case .waiting: Color(red: 1, green: 0.76, blue: 0.3)
         case .done: Color(red: 0.3, green: 0.85, blue: 0.45)
         case .failed: Color(red: 1, green: 0.4, blue: 0.4)
         }

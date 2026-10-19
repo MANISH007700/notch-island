@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 // Logic checks for the app's store and helpers. Run through ./check.sh.
 
@@ -76,12 +76,56 @@ MainActor.assumeIsolated {
     send(["hook_event_name": "SessionEnd"])
     check(store.sessions["check-1"] == nil, "SessionEnd removes the session")
 
+    // An agent that quits without SessionEnd (closing the Codex app) disappears at once, not on the next 5 s sweep.
+    let agent = Process()
+    agent.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    agent.arguments = ["30"]
+    try! agent.run()
+    send(["session_id": "check-2", "hook_event_name": "SessionStart", "_agent_pid": Int(agent.processIdentifier)])
+    kill(agent.processIdentifier, SIGKILL)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+    check(store.sessions["check-2"] == nil, "agent quitting removes its session within 0.5 s")
+
+    print("settings")
+    check(Sound.allCases.allSatisfy { NSSound(named: NSSound.Name($0.file)) != nil } && Set(Sound.allCases.map(\.file)).count == Sound.allCases.count,
+          "every event has its own system sound")
+    let prefs = UserDefaults.standard
+    send(["session_id": "check-3", "hook_event_name": "UserPromptSubmit", "prompt": "Hi", "_agent": "codex"])
+    prefs.set(false, forKey: Pref.agent("codex"))
+    store.dropAgent("codex")
+    check(store.sessions["check-3"] == nil, "switching an agent off drops its cards")
+    var off: [Int32] = [0, 0]
+    socketpair(AF_UNIX, SOCK_STREAM, 0, &off)
+    send(["session_id": "check-3", "hook_event_name": "PermissionRequest", "tool_name": "Bash", "_agent": "codex"], fd: off[0])
+    check(store.sessions["check-3"] == nil && read(off[1], &buf, 1) == 0, "a switched-off agent is ignored and asks in its terminal")
+    prefs.removeObject(forKey: Pref.agent("codex"))
+
+    prefs.set(false, forKey: Pref.approveInNotch)
+    store.expanded = false
+    var ask: [Int32] = [0, 0]
+    socketpair(AF_UNIX, SOCK_STREAM, 0, &ask)
+    send(["session_id": "check-4", "hook_event_name": "PermissionRequest", "tool_name": "Bash"], fd: ask[0])
+    check(store.sessions["check-4"]?.status == .waiting && store.sessions["check-4"]?.pending == nil && read(ask[1], &buf, 1) == 0,
+          "approvals off: card waits, the terminal shows its own prompt")
+    prefs.removeObject(forKey: Pref.approveInNotch)
+
+    prefs.set(false, forKey: Pref.openForApprovals)
+    var quiet: [Int32] = [0, 0]
+    socketpair(AF_UNIX, SOCK_STREAM, 0, &quiet)
+    send(["session_id": "check-5", "hook_event_name": "PermissionRequest", "tool_name": "Bash"], fd: quiet[0])
+    check(store.sessions["check-5"]?.pending != nil && !store.expanded, "auto-open off: approval waits without opening the island")
+    prefs.removeObject(forKey: Pref.openForApprovals)
+    store.archive("check-4")
+    store.archive("check-5")
+
     print("restart recovery")
     store.discover()
     let records = (try? FileManager.default.contentsOfDirectory(atPath: home + "/.claude/sessions"))?.filter { $0.hasSuffix(".json") } ?? []
     if let found = store.sessions.values.first {
         check(true, "discovered \(store.sessions.count) running Claude session(s) from \(records.count) record(s)")
-        check(found.agentPID != nil && found.transcriptPath != nil, "discovered session has its process and transcript")
+        // A session with no message yet has no transcript file, so only some need one.
+        check(store.sessions.values.allSatisfy { $0.agentPID != nil } && store.sessions.values.contains { $0.transcriptPath != nil },
+              "discovered sessions have their process, and transcripts where one exists")
         store.archive(found.id)
         store.discover()
         check(store.sessions[found.id] == nil, "hidden session stays hidden after discovery")
