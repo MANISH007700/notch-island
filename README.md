@@ -5,9 +5,9 @@ Watch every Claude Code, Codex and OpenCode session from your Mac's notch, appro
 
 Free, open source, fully local: no account, no server, no network calls, no telemetry.
 
-[![Notch Island launch video: the notch opens into the island, an edit is approved with its diff, and a question is answered in one click](docs/images/demo.gif)](docs/launch.mp4)
+[![Notch Island demo: an edit waits in the notch with its diff, is approved with ⌘Y, and a question is answered from the notch](docs/images/demo.gif)](docs/demo.mp4)
 
-▶ **[Watch the 21-second launch video](docs/launch.mp4)** (with sound).
+▶ **[Watch the 80-second demo](docs/demo.mp4)** (with sound): three agents at once, approvals with diffs, questions, plan limits, Settings, jumping back to the pane, and a real install.
 
 ![Notch Island showing a Claude Code approval, a finished OpenCode session and a working Codex session](docs/images/hero.png)
 
@@ -151,7 +151,7 @@ Sources/App/         the menu bar app (SwiftUI)
 Sources/Shared/      socket and process helpers used by both
 integrations/        the OpenCode plugin
 Tests/ + check.sh    logic, protocol and installer checks
-docs/                screenshot tooling, images, the launch video and demo sessions
+docs/                screenshot tooling, images, the demo video and demo sessions
 ```
 
 ## Troubleshooting
