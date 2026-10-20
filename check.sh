@@ -78,6 +78,30 @@ out, code, _, _ = run(None)
 check(out == "" and code == 0, "app quits while waiting: no output, Claude shows its own prompt")
 out, code, _, _ = run(None, {"session_id": "debug-1", "hook_event_name": "PreToolUse"})
 check(out == "" and code == 0, "other events never print anything")
+def relay(args, event):
+    """Fake app that only listens: returns (stdout, exit code, event seen) for a hook run with `args`."""
+    seen = {}
+    server = socket.socket(socket.AF_UNIX); server.bind(path); server.listen(1)
+    def serve():
+        conn, _ = server.accept()
+        data = b""
+        while not data.endswith(b"\n"):
+            data += conn.recv(65536)
+        seen.update(json.loads(data)); conn.close()
+    t = threading.Thread(target=serve); t.start()
+    p = subprocess.run([hook] + args, input=json.dumps(event).encode(), capture_output=True, timeout=10)
+    t.join(); server.close(); os.unlink(path)
+    return p.stdout.decode(), p.returncode, seen
+
+out, code, seen = relay(["--agent", "gemini"], {"session_id": "g-1", "cwd": "/tmp", "hook_event_name": "BeforeAgent", "prompt": "hi"})
+check(out == "" and code == 0 and seen.get("hook_event_name") == "UserPromptSubmit" and seen.get("_agent") == "gemini",
+      "gemini: events arrive translated, and the hook prints nothing")
+out, code, seen = relay(["--agent", "cursor"], {"conversation_id": "u-1", "workspace_roots": ["/tmp"], "hook_event_name": "beforeSubmitPrompt", "prompt": "hi"})
+check(out == "" and code == 0 and seen.get("session_id") == "u-1" and seen.get("_agent") == "cursor",
+      "cursor: events arrive translated, and the hook prints nothing")
+start = time.time()
+p = subprocess.run([hook, "--agent", "cursor"], input=b'{"hook_event_name":"beforeReadFile","conversation_id":"u-1"}', capture_output=True, timeout=10)
+check(p.stdout == b"" and p.returncode == 0 and time.time() - start < 0.5, "unused events exit at once without touching the app")
 start = time.time()
 p = subprocess.run([hook], input=json.dumps(req).encode(), capture_output=True, timeout=10)
 check(p.stdout == b"" and p.returncode == 0 and time.time() - start < 0.5, "app not running: exits at once with no output")
@@ -86,7 +110,7 @@ sys.exit(1 if failures else 0)
 PY
 
 echo "settings merge (on copies)"
-sed -n "/<<'PY'/,/^PY$/p" install.sh | sed '1d;$d' > "$TMP/merge.py"
+awk "/<<'PY'/ && !n { n = 1; next } n && /^PY$/ { exit } n" install.sh > "$TMP/merge.py"
 # merge_check <real config> <agent> <expected number of our hooks>
 merge_check() {
   if [ -f "$1" ]; then cp "$1" "$TMP/config.json"; else echo '{}' > "$TMP/config.json"; fi
@@ -112,6 +136,58 @@ CHECK
 }
 merge_check "$HOME/.claude/settings.json" claude 9
 merge_check "$HOME/.codex/hooks.json" codex 7
+merge_check "$HOME/.gemini/settings.json" gemini 7
+
+# Cursor's hooks.json has no groups: {"version": 1, "hooks": {"event": [{"command": ...}]}}.
+if [ -f "$HOME/.cursor/hooks.json" ]; then cp "$HOME/.cursor/hooks.json" "$TMP/cursor.json"; else echo '{}' > "$TMP/cursor.json"; fi
+/usr/bin/python3 -I "$TMP/merge.py" "$TMP/cursor.json" uninstall cursor
+cp "$TMP/cursor.json" "$TMP/cursor-clean.json"
+/usr/bin/python3 -I "$TMP/merge.py" "$TMP/cursor.json" install cursor
+/usr/bin/python3 -I "$TMP/merge.py" "$TMP/cursor.json" install cursor
+/usr/bin/python3 -I - "$TMP/cursor.json" "$TMP/cursor-clean.json" <<'CHECK'
+import json, sys
+d, clean = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+ours = {k: [h for h in v if "notch-island-hook" in h["command"]] for k, v in d["hooks"].items()}
+ours = {k: v for k, v in ours.items() if v}
+assert d["version"] == 1 and len(ours) == 6 and all(len(v) == 1 for v in ours.values()), ours
+others = {k: [h for h in v if "notch-island-hook" not in h["command"]] for k, v in d["hooks"].items()}
+assert {k: v for k, v in others.items() if v} == clean.get("hooks", {}), "other hooks changed"
+print("  ok    cursor: installing twice adds each of the 6 hooks exactly once and keeps other hooks")
+CHECK
+/usr/bin/python3 -I "$TMP/merge.py" "$TMP/cursor.json" uninstall cursor
+cmp -s "$TMP/cursor.json" "$TMP/cursor-clean.json" || { echo "  FAIL  cursor: uninstall did not restore the config"; exit 1; }
+echo "  ok    cursor: uninstall restores the config exactly"
+
+echo "installer, in a scratch home (launchctl and pkill stubbed, so the real app and configs are never touched)"
+FAKE="$TMP/home"
+mkdir -p "$FAKE/.codex" "$FAKE/.config/opencode" "$FAKE/.gemini" "$FAKE/.copilot" "$FAKE/.cursor" "$TMP/shim"
+for c in launchctl pkill; do printf '#!/bin/sh\nexit 0\n' > "$TMP/shim/$c"; chmod +x "$TMP/shim/$c"; done
+run_install() { HOME="$FAKE" PATH="$TMP/shim:$PATH" COPILOT_HOME= "$@" </dev/null >"$TMP/install.log" 2>&1 || { cat "$TMP/install.log"; exit 1; }; }
+# connected <agents...>: exactly these agents carry Notch Island hooks in the scratch home.
+connected() {
+  /usr/bin/python3 -I - "$FAKE" "$*" <<'CHECK'
+import json, os, sys
+home, want = sys.argv[1], set(sys.argv[2].split())
+def has(path):
+    return os.path.exists(path) and "notch-island-hook" in open(path).read()
+got = {a for a, ok in {
+    "claude": has(home + "/.claude/settings.json"), "codex": has(home + "/.codex/hooks.json"),
+    "opencode": os.path.exists(home + "/.config/opencode/plugins/notch-island.js"), "gemini": has(home + "/.gemini/settings.json"),
+    "copilot": has(home + "/.copilot/hooks/notch-island.json"), "cursor": has(home + "/.cursor/hooks.json")}.items() if ok}
+assert got == want, "connected %s, expected %s" % (sorted(got), sorted(want))
+CHECK
+}
+run_install ./install.sh
+connected claude codex opencode gemini copilot cursor
+grep -q "Gemini CLI connected" "$TMP/install.log" && grep -q "GitHub Copilot CLI connected" "$TMP/install.log" && grep -q "Cursor connected" "$TMP/install.log"
+echo "  ok    not interactive: every agent found is connected"
+run_install env NOTCH_ISLAND_AGENTS="claude gemini" ./install.sh
+connected claude gemini
+echo "  ok    NOTCH_ISLAND_AGENTS picks agents, and running it again disconnects the rest"
+run_install ./install.sh uninstall
+connected
+[ ! -e "$FAKE/Applications/Notch Island.app" ] && [ ! -e "$FAKE/.copilot/hooks/notch-island.json" ]
+echo "  ok    uninstall removes the app and every agent's hooks"
 
 echo "opencode plugin"
 node --check integrations/opencode/notch-island.js && echo "  ok    plugin parses"

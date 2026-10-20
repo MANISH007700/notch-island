@@ -50,6 +50,81 @@ check(summary.reply == "Final **reply**", "last assistant text")
 check(transcriptSummary("/nonexistent").title == nil, "missing transcript is harmless")
 try? FileManager.default.removeItem(atPath: transcript)
 
+print("agent adapters (payloads captured from real Gemini CLI 0.64 and Copilot CLI 1.0.100 runs)")
+let gSession: [String: Any] = ["session_id": "g-1", "cwd": "/tmp/play"]
+func gemini(_ extra: [String: Any]) -> [String: Any]? { normalize(gSession.merging(extra) { $1 }, agent: "gemini") }
+check(gemini(["hook_event_name": "BeforeAgent", "prompt": "create hello.txt"])?["hook_event_name"] as? String == "UserPromptSubmit",
+      "Gemini: BeforeAgent is the prompt")
+let gTool = gemini(["hook_event_name": "BeforeTool", "tool_name": "write_file", "tool_input": ["file_path": "/tmp/play/hello.txt", "content": "hi"]])
+check(gTool?["hook_event_name"] as? String == "PreToolUse" && gTool?["tool_name"] as? String == "Write", "Gemini: tools get Claude's names")
+let gAsk = gemini(["hook_event_name": "Notification", "notification_type": "ToolPermission", "message": "Tool Confirm Write: hello.txt requires editing",
+                   "details": ["type": "edit", "title": "Confirm Write: hello.txt"]])
+check(gAsk?["notification_type"] as? String == "permission_prompt" && gAsk?["message"] as? String == "Confirm Write: hello.txt",
+      "Gemini: its approval prompt flags the card with the prompt's title")
+check(gemini(["hook_event_name": "Notification", "notification_type": "Other"]) == nil, "Gemini: other notifications are ignored")
+let gStop = gemini(["hook_event_name": "AfterAgent", "prompt": "x", "prompt_response": "Done: hello.txt now contains hi."])
+check(gStop?["hook_event_name"] as? String == "Stop" && gStop?["last_assistant_message"] as? String == "Done: hello.txt now contains hi.",
+      "Gemini: AfterAgent finishes the turn with its reply")
+check(gemini(["hook_event_name": "BeforeModel"]) == nil, "Gemini: model events are ignored")
+
+let copilotLog = NSTemporaryDirectory() + "notch-island-copilot-\(getpid()).jsonl"
+try! """
+{"type":"assistant.message","data":{"content":"Created `bye.txt` containing `bye`."}}
+{"type":"assistant.message","data":{"content":"","toolRequests":[]}}
+{"type":"assistant.turn_end","data":{"turnId":"2"}}
+
+""".write(toFile: copilotLog, atomically: true, encoding: .utf8)
+let cStop = normalize(["hook_event_name": "Stop", "session_id": "c-1", "cwd": "/tmp/play", "stop_reason": "end_turn", "transcript_path": copilotLog], agent: "copilot")
+check(cStop?["last_assistant_message"] as? String == "Created `bye.txt` containing `bye`.", "Copilot: the reply is read from its session log")
+// Copilot fires Stop before its reply reaches the log: never show the previous turn's reply, wait for this one.
+try! """
+{"type":"user.message","data":{"content":"first"}}
+{"type":"assistant.message","data":{"content":"Old reply"}}
+{"type":"user.message","data":{"content":"second"}}
+
+""".write(toFile: copilotLog, atomically: true, encoding: .utf8)
+DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) {
+    let h = FileHandle(forWritingAtPath: copilotLog)!
+    h.seekToEndOfFile(); h.write(Data(#"{"type":"assistant.message","data":{"content":"New reply"}}"#.utf8 + [0x0A])); h.closeFile()
+}
+check(copilotReply(copilotLog) == "New reply", "Copilot: a reply written just after Stop is waited for, an older turn's is never used")
+try? FileManager.default.removeItem(atPath: copilotLog)
+let cAsk = normalize(["sessionId": "c-1", "cwd": "/tmp/play", "message": "Run command: ls", "title": "Permission needed",
+                      "hook_event_name": "Notification", "notification_type": "permission_prompt"], agent: "copilot")
+check(cAsk?["session_id"] as? String == "c-1" && cAsk?["notification_type"] as? String == "permission_prompt",
+      "Copilot: its permission prompt flags the card (sessionId becomes session_id)")
+check(normalize(["sessionId": "c-1", "hook_event_name": "Notification", "notification_type": "agent_idle"], agent: "copilot") == nil,
+      "Copilot: other notifications are ignored")
+
+print("agent adapters (payloads captured from a real cursor-agent run)")
+let uPrompt = normalize(["hook_event_name": "beforeSubmitPrompt", "conversation_id": "u-1", "session_id": "u-1", "workspace_roots": ["/tmp/play"],
+                         "prompt": "create a file cursor.txt", "attachments": []], agent: "cursor")
+check(uPrompt?["hook_event_name"] as? String == "UserPromptSubmit" && uPrompt?["session_id"] as? String == "u-1" && uPrompt?["cwd"] as? String == "/tmp/play",
+      "Cursor: the conversation is the session, its workspace the folder")
+let uShell = normalize(["hook_event_name": "postToolUse", "conversation_id": "u-1", "tool_name": "Shell", "cwd": "", "workspace_roots": ["/tmp/play"],
+                        "tool_input": ["command": "ls", "cwd": "", "timeout": 30000]], agent: "cursor")
+check(uShell?["tool_name"] as? String == "Bash" && uShell?["cwd"] as? String == "/tmp/play", "Cursor: Shell reads as Bash, and an empty cwd falls back to the workspace")
+let cursorLog = NSTemporaryDirectory() + "notch-island-cursor-\(getpid()).jsonl"
+try! """
+{"role":"user","message":{"content":[{"type":"text","text":"create a file cursor.txt"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Creating it."},{"type":"tool_use","name":"Write","input":{}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Created `cursor.txt` with `hey`."}]}}
+{"type":"turn_ended","status":"success"}
+
+""".write(toFile: cursorLog, atomically: true, encoding: .utf8)
+let uStop = normalize(["hook_event_name": "stop", "conversation_id": "u-1", "status": "completed", "transcript_path": cursorLog], agent: "cursor")
+check(uStop?["hook_event_name"] as? String == "Stop" && uStop?["last_assistant_message"] as? String == "Created `cursor.txt` with `hey`.",
+      "Cursor: the reply is read from its transcript (the CLI sends no afterAgentResponse)")
+try? FileManager.default.removeItem(atPath: cursorLog)
+check(normalize(["hook_event_name": "stop", "conversation_id": "u-1", "status": "error"], agent: "cursor")?["hook_event_name"] as? String == "StopFailure",
+      "Cursor: a turn that errors is a failure")
+check(normalize(["hook_event_name": "beforeReadFile", "conversation_id": "u-1"], agent: "cursor") == nil, "Cursor: unused events are ignored")
+check(normalize(["hook_event_name": "PreToolUse", "session_id": "x"], agent: nil)?["hook_event_name"] as? String == "PreToolUse",
+      "Claude Code and Codex events pass through unchanged")
+check(normalize(["hook_event_name": "beforeSubmitPrompt", "conversation_id": "u-1", "session_id": "u-1", "cursor_version": "2026.10.19-6bbf2c4",
+                 "prompt": "hey"], agent: nil) == nil,
+      "Cursor running Claude Code's hooks is ignored there (its own hooks report it, so the card stays Cursor's)")
+
 print("live process check")
 let me = getpid()
 let myStartMs = (processStart(me) ?? 0) * 1000
@@ -88,6 +163,14 @@ MainActor.assumeIsolated {
     check(store.sessions["check-1"]?.status == .done && store.sessions["check-1"]?.lastMessage == "All done", "Stop marks done with the reply")
     send(["hook_event_name": "SessionEnd"])
     check(store.sessions["check-1"] == nil, "SessionEnd removes the session")
+    send(["hook_event_name": "SessionEnd"])
+    check(store.sessions["check-1"] == nil, "a second SessionEnd (Gemini sends two) does not bring it back")
+    send(["session_id": "check-6", "hook_event_name": "UserPromptSubmit", "prompt": "Hi", "_agent": "cursor"])
+    send(["session_id": "check-6", "hook_event_name": "AssistantMessage", "last_assistant_message": "Hello"])
+    send(["session_id": "check-6", "hook_event_name": "Stop"])
+    check(store.sessions["check-6"]?.status == .done && store.sessions["check-6"]?.lastMessage == "Hello",
+          "a reply sent on its own (Cursor) shows when the turn stops")
+    store.archive("check-6")
 
     // An agent that quits without SessionEnd (closing the Codex app) disappears at once, not on the next 5 s sweep.
     let agent = Process()

@@ -418,7 +418,7 @@ struct AgentAvatar: View {
     }
 }
 
-// The agent's real icon when its app is installed, else its initials on its colour.
+// The agent's real icon when its app is installed, else its mark on its brand colours, else its initials.
 struct AgentGlyph: View {
     let agent: String
     let size: CGFloat
@@ -433,12 +433,19 @@ struct AgentGlyph: View {
             } else {
                 image.frame(width: size, height: size)
             }
+        } else if let logo = agentLogo(agent) {
+            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                .fill(LinearGradient(colors: logoTile(agent), startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: size * 0.9, height: size * 0.9)
+                .overlay(Image(nsImage: logo).resizable().interpolation(.high).renderingMode(.template)
+                    .foregroundStyle(.white).frame(width: size * 0.5, height: size * 0.5))
+                .frame(width: size, height: size)
         } else {
             let color = agentColor(agent)
             RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
                 .fill(LinearGradient(colors: [color, color.opacity(0.72)], startPoint: .top, endPoint: .bottom))
                 .frame(width: size * 0.9, height: size * 0.9)
-                .overlay(Text(["claude": "CC", "codex": "CX", "opencode": "OC"][agent] ?? String(agent.prefix(2)).uppercased())
+                .overlay(Text(["claude": "CC", "codex": "CX", "opencode": "OC", "gemini": "GE", "copilot": "CP", "cursor": "CU"][agent] ?? String(agent.prefix(2)).uppercased())
                     .font(.system(size: size * 0.33, weight: .heavy, design: .rounded)).foregroundStyle(.black.opacity(0.7)))
                 .frame(width: size, height: size)
         }
@@ -450,6 +457,7 @@ let agentIconSources: [String: [(app: String, file: String?)]] = [
     "claude": [("/Applications/Claude.app", nil), (home + "/Applications/Claude.app", nil)],
     "codex": [("/Applications/Codex.app", nil), ("/Applications/ChatGPT.app", "/Applications/ChatGPT.app/Contents/Resources/app.icns")],
     "opencode": [("/Applications/OpenCode.app", nil), (home + "/Applications/OpenCode.app", nil)],
+    "cursor": [("/Applications/Cursor.app", nil), (home + "/Applications/Cursor.app", nil)],
 ]
 
 typealias AgentIcon = (image: NSImage, app: String, raw: Bool)
@@ -988,8 +996,10 @@ struct AgentRow: View {
     }
 
     var body: some View {
-        SettingRow(title: ["claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"][agent] ?? agent,
-                   detail: on ? (agent == "codex" ? "CLI and the Codex app" : "Terminal sessions") : "Ignored, it asks in its own terminal",
+        SettingRow(title: ["claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "gemini": "Gemini CLI",
+                           "copilot": "GitHub Copilot CLI", "cursor": "Cursor"][agent] ?? agent,
+                   detail: on ? (["codex": "CLI and the Codex app", "cursor": "The Cursor app and its CLI"][agent] ?? "Terminal sessions")
+                       : "Ignored, it asks in its own terminal",
                    dot: agentColor(agent), isOn: $on)
             .onChange(of: on) { if !on { store.dropAgent(agent) } }
     }
@@ -1099,7 +1109,17 @@ func toolIcon(_ tool: String) -> String {
 }
 
 func agentName(_ agent: String) -> String {
-    ["claude": "Claude", "codex": "Codex", "opencode": "OpenCode"][agent] ?? agent.capitalized
+    ["claude": "Claude", "codex": "Codex", "opencode": "OpenCode", "gemini": "Gemini", "copilot": "Copilot", "cursor": "Cursor"][agent]
+        ?? agent.capitalized
+}
+
+// Tile behind an agent's mark, in its brand colours.
+func logoTile(_ agent: String) -> [Color] {
+    switch agent {
+    case "gemini": [Color(red: 0.28, green: 0.59, blue: 0.89), Color(red: 0.57, green: 0.41, blue: 0.75)]
+    case "claude": [Color(red: 0.85, green: 0.47, blue: 0.34), Color(red: 0.76, green: 0.39, blue: 0.28)]
+    default: [Color(white: 0.2), Color(white: 0.1)]  // Copilot, Cursor and OpenCode: white on near-black
+    }
 }
 
 func agentColor(_ agent: String) -> Color {
@@ -1107,6 +1127,9 @@ func agentColor(_ agent: String) -> Color {
     case "claude": Color(red: 0.92, green: 0.55, blue: 0.38)
     case "codex": Color(red: 0.55, green: 0.8, blue: 1)
     case "opencode": Color(red: 0.75, green: 0.7, blue: 1)
+    case "gemini": Color(red: 0.45, green: 0.6, blue: 1)
+    case "copilot": Color(red: 0.7, green: 0.9, blue: 0.6)
+    case "cursor": Color(red: 0.85, green: 0.85, blue: 0.85)
     default: .white
     }
 }
