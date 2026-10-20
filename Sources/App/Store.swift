@@ -61,7 +61,7 @@ enum Pref {
     static let approveInNotch = "approveInNotch"
     static let showUsage = "showUsage"
     static let shortcuts = "shortcuts"
-    static let agents = ["claude", "codex", "opencode"]
+    static let agents = ["claude", "codex", "opencode", "gemini", "copilot", "cursor"]
     static func agent(_ name: String) -> String { "agent." + name }
     static let defaults: [String: Any] = [openOnHover: true, openForApprovals: true, approveInNotch: true, showUsage: true, shortcuts: true]
 
@@ -140,6 +140,8 @@ final class Store: ObservableObject {
         }
         // Only a permission request keeps its connection open, waiting for the answer.
         if name != "PermissionRequest" && fd >= 0 { close(fd) }
+        // An end for a session already gone (Gemini CLI sends two) must not chime again or bring it back.
+        if name == "SessionEnd" && sessions[id] == nil { return }
         hidden.remove(id)
         let isNew = sessions[id] == nil
         var s = sessions[id] ?? Session(id: id)
@@ -199,6 +201,9 @@ final class Store: ObservableObject {
             s.tool = nil
             s.activity = nil
             play(.done)
+        case "AssistantMessage":
+            // A reply that arrives on its own (Cursor), before the turn's Stop.
+            s.lastMessage = e["last_assistant_message"] as? String ?? s.lastMessage
         case "StopFailure":
             dropPending(&s)
             s.status = .failed

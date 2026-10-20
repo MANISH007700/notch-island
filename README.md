@@ -1,7 +1,7 @@
 # Notch Island
 
 **A Dynamic Island for your coding agents.**
-Watch every Claude Code, Codex and OpenCode session from your Mac's notch, approve tool calls with one click, and jump straight back to the right terminal pane.
+Watch every Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot CLI and OpenCode session from your Mac's notch, approve tool calls with one click, and jump straight back to the right terminal pane.
 
 Free, open source, fully local: no account, no server, no network calls, no telemetry.
 
@@ -42,9 +42,14 @@ All screenshots and the video use made-up sessions.
 |---|---|---|---|
 | Claude Code | Yes, with Claude's own session titles | Yes, including "Always allow" | Hooks in `~/.claude/settings.json` |
 | Codex | Yes, from the CLI and the Codex app | Yes | Hooks in `~/.codex/hooks.json` |
+| Cursor | Yes, the Cursor app's agent and `cursor-agent` | No; you approve in Cursor | Hooks in `~/.cursor/hooks.json` |
+| Gemini CLI | Yes, with its replies | Shows when it needs you, with what it asks; you answer in Gemini CLI | Hooks in `~/.gemini/settings.json` |
+| GitHub Copilot CLI | Yes, with its replies | Shows when it needs you, with what it asks; you answer in Copilot CLI | Its own file, `~/.copilot/hooks/notch-island.json` |
 | OpenCode | Yes, with OpenCode's own session titles | Shows when it needs you; you answer in OpenCode | Plugin in `~/.config/opencode/plugins/` |
 
-The installer sets up every agent it finds on your Mac and skips the rest.
+The installer offers every agent it finds on your Mac and skips the rest.
+Cursor, Gemini CLI and Copilot CLI have no hook that can safely wait for your answer, so their approvals stay in their own prompts: the card turns amber and tells you what is waiting (Cursor does not report its prompts, so its card stays on what it is working on).
+Gemini CLI no longer accepts personal Google sign-in; it works with a Gemini API key or Vertex AI.
 
 ## Install
 
@@ -62,12 +67,21 @@ Notch Island
   ✓ Built from source
   ✓ Installed to ~/Applications/Notch Island.app
   ✓ Claude Code connected
+  Connect Claude Code? [Y/n]
+  ✓ Claude Code connected
+  Connect Codex? [Y/n]
   ✓ Codex connected  (first time: open Codex, run /hooks and approve the Notch Island entries)
-  ✓ OpenCode connected
+  ...
+  ✓ Gemini CLI connected
+  ✓ GitHub Copilot CLI connected
+  ✓ Cursor connected
   ✓ Running, and starts at login
 ```
 
 The installer builds the app from source, puts it in `~/Applications/Notch Island.app`, connects your agents and starts it at login.
+It asks about each agent it finds (Enter means yes); answer `n` to leave one out, and run it again later to change your mind: an agent you say no to is disconnected.
+To choose without questions, name the agents: `NOTCH_ISLAND_AGENTS="claude cursor gemini" ./install.sh` (ids: `claude`, `codex`, `opencode`, `gemini`, `copilot`, `cursor`).
+Run without a terminal (from a script), it connects every agent it finds.
 It saves an untouched copy of each config it edits next to the original, ending in `.bak-notch-island`.
 To update, run `git pull && ./install.sh`; your settings are kept.
 
@@ -91,20 +105,24 @@ To update, run `git pull && ./install.sh`; your settings are kept.
 ## How it works
 
 ```
- Claude Code ─┐  hooks
- Codex ───────┼──────────▶ notch-island-hook ──JSON line──▶ ~/.notch-island/run/island.sock ──▶ Notch Island.app
- OpenCode ────┘  plugin            ▲                                                              │
-                                   └──────────────── your Allow / Deny, as one JSON line ◀────────┘
+ Claude Code ─┐
+ Codex ───────┤  hooks
+ Cursor ──────┤
+ Gemini CLI ──┼──────────▶ notch-island-hook ──JSON line──▶ ~/.notch-island/run/island.sock ──▶ Notch Island.app
+ Copilot CLI ─┤                    ▲                                                              │
+ OpenCode ────┘  plugin            └──────────────── your Allow / Deny, as one JSON line ◀────────┘
 ```
 
 - Each agent runs a tiny hook program on its events: session start, prompt, tool use, permission request, stop.
 - The hook adds which terminal and pane the agent runs in, then hands the event to the app over a local Unix socket.
+- Cursor, Gemini CLI and Copilot CLI each send their own kind of event; the hook translates them into Claude Code's shape first (`Sources/Shared/Agents.swift`), so the app treats every agent the same way.
+  Their replies, where an event leaves them out, are read from the agent's own session log.
 - Only permission requests wait for an answer. Every other event is fire and forget, so your agents never slow down.
 - Your click goes back to the waiting hook as one line (allow, always, deny, or the picked answers), and the hook hands it to the agent in the agent's own hook format.
 - If the app is not running, the hook exits instantly with no output and the agent behaves exactly as if Notch Island were not installed.
 - Claude plan usage comes from the data Claude Code already passes to your status line; the installer adds a `tee` in front of your status line command to save a copy.
 - Codex plan usage is read from the `rate_limits` Codex already writes into its session logs in `~/.codex/sessions/`.
-- Agent icons are read from the apps installed on your Mac (Claude, Codex); no logos ship with Notch Island, and an agent without an installed app shows its initials.
+- Agent icons are read from the apps installed on your Mac (Claude, Codex, Cursor). An agent with no app to borrow from (Gemini CLI, Copilot CLI) shows its mark from [Simple Icons](https://simpleicons.org) (CC0) on its colours; the marks belong to their owners and only label whose card it is.
 - On launch the app reads Claude Code's own records of running sessions in `~/.claude/sessions/`, so nothing is lost when it restarts.
 
 ## Uninstall
@@ -113,7 +131,7 @@ To update, run `git pull && ./install.sh`; your settings are kept.
 ./install.sh uninstall
 ```
 
-This removes the app, the login item, the OpenCode plugin and Notch Island's hook entries.
+This removes the app, the login item, the OpenCode plugin, the Copilot hook file and Notch Island's hook entries in every agent's config.
 Everything else in your configs stays as it is.
 
 ## Development
@@ -148,7 +166,7 @@ In debug mode `kill -USR1` toggles the island, `kill -USR2` allows the newest re
 ```
 Sources/Hook/        the hook every agent calls
 Sources/App/         the menu bar app (SwiftUI)
-Sources/Shared/      socket and process helpers used by both
+Sources/Shared/      socket and process helpers, and the agent translations, used by both
 integrations/        the OpenCode plugin
 Tests/ + check.sh    logic, protocol and installer checks
 docs/                screenshot tooling, images, the demo video and demo sessions
@@ -158,6 +176,7 @@ docs/                screenshot tooling, images, the demo video and demo session
 
 - **Nothing shows up.** Check the app is running: `launchctl print gui/$(id -u)/local.notch-island | grep state`. Sessions that started before you installed appear on their next event (Claude Code sessions appear right away).
 - **Codex sessions do not appear.** Approve the hooks once with `/hooks` in Codex.
+- **Gemini CLI sessions do not appear.** Run `/hooks` in Gemini CLI and check the Notch Island hooks are enabled.
 - **An agent's sessions never show.** Check that agent is switched on under Settings → Agents.
 - **No usage numbers.** Claude Code only sends them on Pro and Max plans, after the first reply of a session.
 - **Jump only brings the app forward.** Pane-level jumping works for WezTerm and tmux; other terminals are activated as a whole.

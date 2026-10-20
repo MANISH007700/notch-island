@@ -1,21 +1,25 @@
 import Foundation
 
-// Claude Code hook. Forwards the event JSON to Notch Island over a Unix socket.
-// Fails open: if the app is not running, it prints nothing and Claude carries on as normal.
+// Agent hook (Claude Code, Codex, Gemini CLI, Copilot CLI, Cursor). Forwards the event JSON to Notch Island over a Unix socket.
+// Fails open: if the app is not running, it prints nothing and the agent carries on as normal.
 
 signal(SIGPIPE, SIG_IGN)
 
+// Which agent sent this: --agent codex, --agent gemini, ... (Claude Code when absent).
+var agent: String?
+if let i = CommandLine.arguments.firstIndex(of: "--agent"), i + 1 < CommandLine.arguments.count {
+    agent = CommandLine.arguments[i + 1]
+}
+
 let input = FileHandle.standardInput.readDataToEndOfFile()
-guard var event = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any] else { exit(0) }
+guard let raw = (try? JSONSerialization.jsonObject(with: input)) as? [String: Any],
+      var event = normalize(raw, agent: agent) else { exit(0) }
 
 // Terminal info, so the app can jump back to the right window and pane.
 let (terminal, agentPID) = terminalInfo(from: getppid(), env: ProcessInfo.processInfo.environment)
 event["_terminal"] = terminal
 event["_agent_pid"] = agentPID
-// Which agent sent this: --agent codex, --agent opencode, ... (Claude Code when absent).
-if let i = CommandLine.arguments.firstIndex(of: "--agent"), i + 1 < CommandLine.arguments.count {
-    event["_agent"] = CommandLine.arguments[i + 1]
-}
+event["_agent"] = agent
 
 var line = (try? JSONSerialization.data(withJSONObject: event)) ?? Data()
 line.append(0x0A)
